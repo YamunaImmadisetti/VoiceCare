@@ -1,53 +1,53 @@
-/**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
- */
-
-import { Platform } from 'react-native';
-
-const tintColorLight = '#0a7ea4';
-const tintColorDark = '#fff';
-
+// constants/theme.ts
 export const Colors = {
-  light: {
-    text: '#11181C',
-    background: '#fff',
-    tint: tintColorLight,
-    icon: '#687076',
-    tabIconDefault: '#687076',
-    tabIconSelected: tintColorLight,
-  },
-  dark: {
-    text: '#ECEDEE',
-    background: '#151718',
-    tint: tintColorDark,
-    icon: '#9BA1A6',
-    tabIconDefault: '#9BA1A6',
-    tabIconSelected: tintColorDark,
-  },
-};
+  sageDark:   '#243F38',
+  sage:       '#3D6B5F',
+  sageMid:    '#5A8F80',
+  sageLight:  '#A8CBBF',
+  sagePale:   '#EAF3EF',
+  cream:      '#FDFAF5',
+  amber:      '#C4813A',
+  amberSoft:  '#FBF1E4',
+  red:        '#C94040',
+  redSoft:    '#FCF0F0',
+  sky:        '#3876B0',
+  skySoft:    '#EBF3FB',
+  text:       '#1A2E28',
+  textMid:    '#456058',
+  textMuted:  '#8FA89F',
+  border:     'rgba(61,107,95,0.15)',
+  borderMid:  'rgba(61,107,95,0.25)',
+  white:      '#FFFFFF',
+}
 
-export const Fonts = Platform.select({
-  ios: {
-    /** iOS `UIFontDescriptorSystemDesignDefault` */
-    sans: 'system-ui',
-    /** iOS `UIFontDescriptorSystemDesignSerif` */
-    serif: 'ui-serif',
-    /** iOS `UIFontDescriptorSystemDesignRounded` */
-    rounded: 'ui-rounded',
-    /** iOS `UIFontDescriptorSystemDesignMonospaced` */
-    mono: 'ui-monospace',
+export const Font = {
+  serif:      'Lora_400Regular',
+  serifBold:  'Lora_600SemiBold',
+  sans:       'Nunito_400Regular',
+  sansMedium: 'Nunito_600SemiBold',
+  sansBold:   'Nunito_700Bold',
+}
+
+export const Radius = {
+  sm:   10,
+  md:   16,
+  lg:   24,
+  full: 999,
+}
+
+export const Shadow = {
+  sm: {
+    shadowColor: '#243F38',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  default: {
-    sans: 'normal',
-    serif: 'serif',
-    rounded: 'normal',
-    mono: 'monospace',
+  lg: {
+    shadowColor: '#243F38',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    elevation: 8,
   },
-  web: {
-    sans: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-    serif: "Georgia, 'Times New Roman', serif",
-    rounded: "'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif",
-    mono: "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-  },
-});
+}
