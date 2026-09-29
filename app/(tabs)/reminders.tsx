@@ -1,10 +1,21 @@
 import { Colors, Font, Radius, Shadow } from '@/constants/theme'
+import {
+  DoseStatus,
+  PermissionState,
+  ensureNotificationPermission,
+  fetchTakenToday,
+  getDoseStatus,
+  getNotificationPermission,
+  logDoseTaken,
+  sortByDoseTime,
+  syncMedicationReminders,
+} from '@/lib/medReminders'
 import { supabase } from '@/lib/supabase'
+import { useFocusEffect } from 'expo-router'
 import { useCallback, useEffect, useState } from 'react'
-import { ActivityIndicator, Alert, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { ActivityIndicator, Alert, Linking, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 
-type MedStatus = 'done' | 'upcoming' | 'missed'
-type TabKey = 'today' | 'upcoming' | 'all'
+type TabKey = 'today' | 'upcoming' | 'missed'
 
 type Medication = {
   id: string
@@ -14,48 +25,28 @@ type Medication = {
   frequencies: string[]
   time: string
   with_food: string
-  status: MedStatus
+  status: DoseStatus
 }
 
-function getStatus(time: string, frequencies: string[]): MedStatus {
-  const now = new Date()
-  const hour = now.getHours()
-
-  // Simple logic: morning = before 12, afternoon = 12-17, evening/bedtime = after 17
-  const isMorning   = frequencies.includes('Morning')   && hour >= 12
-  const isAfternoon = frequencies.includes('Afternoon') && hour >= 17
-  const isEvening   = frequencies.includes('Evening')   && hour >= 21
-  const isBedtime   = frequencies.includes('Bedtime')   && hour >= 22
-
-  if (isMorning || isAfternoon || isEvening || isBedtime) return 'missed'
-
-  // Parse time string like "08:00 AM"
-  const [timePart, meridiem] = time.split(' ')
-  const [h, m] = timePart.split(':').map(Number)
-  let medHour = h
-  if (meridiem === 'PM' && h !== 12) medHour += 12
-  if (meridiem === 'AM' && h === 12) medHour = 0
-
-  if (hour > medHour) return 'done'
-  return 'upcoming'
-}
-
-function MedCard({ med, onMarkDone }: { med: Medication; onMarkDone: (id: string) => void }) {
+function MedCard({ med, saving, onMarkDone }: { med: Medication; saving: boolean; onMarkDone: (id: string) => void }) {
   const statusColor = {
-    done:     Colors.sage,
+    taken:    Colors.sage,
     upcoming: Colors.amber,
+    due:      Colors.sky,
     missed:   Colors.red,
   }[med.status]
 
   const statusBg = {
-    done:     Colors.sagePale,
+    taken:    Colors.sagePale,
     upcoming: Colors.amberSoft,
+    due:      Colors.skySoft,
     missed:   Colors.redSoft,
   }[med.status]
 
   const statusLabel = {
-    done:     '✓ Taken',
+    taken:    '✓ Taken',
     upcoming: 'Upcoming',
+    due:      'Due now',
     missed:   'Missed',
   }[med.status]
 
@@ -73,12 +64,13 @@ function MedCard({ med, onMarkDone }: { med: Medication; onMarkDone: (id: string
         <View style={[styles.statusBadge, { backgroundColor: statusBg }]}>
           <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
         </View>
-        {med.status === 'upcoming' && (
+        {med.status !== 'taken' && (
           <TouchableOpacity
-            style={styles.markDoneBtn}
+            style={[styles.markDoneBtn, saving && { opacity: 0.6 }]}
             onPress={() => onMarkDone(med.id)}
+            disabled={saving}
           >
-            <Text style={styles.markDoneText}>Mark Done</Text>
+            <Text style={styles.markDoneText}>{saving ? 'Saving…' : 'Mark Taken'}</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -90,12 +82,13 @@ export default function RemindersScreen() {
   const [activeTab, setActiveTab]   = useState<TabKey>('today')
   const [meds, setMeds]             = useState<Medication[]>([])
   const [loading, setLoading]       = useState(true)
-  const [markedDone, setMarkedDone] = useState<Set<string>>(new Set())
+  const [savingId, setSavingId]     = useState<string | null>(null)
+  const [permission, setPermission] = useState<PermissionState>('granted')
 
   const TABS: { key: TabKey; label: string }[] = [
     { key: 'today',    label: 'Today'    },
     { key: 'upcoming', label: 'Upcoming' },
-    { key: 'all',      label: 'All'      },
+    { key: 'missed',   label: 'Missed'   },
   ]
 
   const loadMeds = useCallback(async () => {
@@ -103,15 +96,17 @@ export default function RemindersScreen() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) return
 
-      const { data, error } = await supabase
-        .from('medications')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('time', { ascending: true })
+      const [{ data, error }, taken] = await Promise.all([
+        supabase.from('medications').select('*').eq('user_id', user.id),
+        fetchTakenToday(user.id),
+      ])
 
       if (error) throw error
 
-      const medsWithStatus: Medication[] = (data ?? []).map(m => ({
+      const now = new Date()
+      const medsWithStatus: Medication[] = sortByDoseTime(
+        (data ?? []).filter(m => m.active !== false),
+      ).map(m => ({
         id:          m.id,
         name:        m.name,
         dosage:      m.dosage,
@@ -119,7 +114,7 @@ export default function RemindersScreen() {
         frequencies: m.frequencies ?? [],
         time:        m.time,
         with_food:   m.with_food,
-        status:      markedDone.has(m.id) ? 'done' : getStatus(m.time, m.frequencies ?? []),
+        status:      getDoseStatus(m.time, taken.has(m.id), now),
       }))
 
       setMeds(medsWithStatus)
@@ -128,24 +123,52 @@ export default function RemindersScreen() {
     } finally {
       setLoading(false)
     }
-  }, [markedDone])
+  }, [])
 
+  // Reload whenever the tab is opened (e.g. after tapping a reminder notification)
+  useFocusEffect(
+    useCallback(() => {
+      loadMeds()
+      getNotificationPermission().then(setPermission).catch(() => {})
+    }, [loadMeds]),
+  )
+
+  // Keep statuses current while the screen stays open
   useEffect(() => {
-    loadMeds()
+    const id = setInterval(loadMeds, 60_000)
+    return () => clearInterval(id)
   }, [loadMeds])
 
-  function handleMarkDone(id: string) {
-    setMarkedDone(prev => new Set([...prev, id]))
-    Alert.alert('✓ Marked as taken', 'Great job staying on track!')
+  async function handleMarkDone(id: string) {
+    setSavingId(id)
+    try {
+      await logDoseTaken(id)
+      setMeds(prev => prev.map(m => (m.id === id ? { ...m, status: 'taken' } : m)))
+      Alert.alert('✓ Marked as taken', 'Great job staying on track!')
+    } catch (e: any) {
+      Alert.alert('Could not save', e?.message ?? 'Please check your connection and try again.')
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  async function handleEnableNotifications() {
+    const granted = await ensureNotificationPermission()
+    if (granted) {
+      setPermission('granted')
+      syncMedicationReminders().catch(e => console.log('Reminder sync error:', e))
+    } else {
+      Linking.openSettings()
+    }
   }
 
   const filteredMeds = meds.filter(m => {
-    if (activeTab === 'today')    return m.status === 'done' || m.status === 'upcoming'
-    if (activeTab === 'upcoming') return m.status === 'upcoming'
+    if (activeTab === 'upcoming') return m.status === 'upcoming' || m.status === 'due'
+    if (activeTab === 'missed')   return m.status === 'missed'
     return true
   })
 
-  const takenCount = meds.filter(m => m.status === 'done').length
+  const takenCount = meds.filter(m => m.status === 'taken').length
   const totalCount = meds.length
   const adherencePct = totalCount > 0 ? Math.round((takenCount / totalCount) * 100) : 0
 
@@ -175,6 +198,14 @@ export default function RemindersScreen() {
 
       <ScrollView style={styles.body} showsVerticalScrollIndicator={false}>
 
+        {/* Notifications off warning */}
+        {permission === 'denied' && (
+          <TouchableOpacity style={styles.permCard} onPress={handleEnableNotifications} activeOpacity={0.85}>
+            <Text style={styles.permTitle}>🔕 Reminders are turned off</Text>
+            <Text style={styles.permSub}>Tap here to allow notifications so CareVoice can remind you when it&apos;s time for your medicine.</Text>
+          </TouchableOpacity>
+        )}
+
         {/* Adherence bar */}
         <View style={[styles.adherenceCard, Shadow.sm]}>
           <Text style={styles.adherenceTitle}>Today&apos;s Adherence</Text>
@@ -193,10 +224,14 @@ export default function RemindersScreen() {
         ) : filteredMeds.length === 0 ? (
           <View style={styles.emptyWrap}>
             <Text style={styles.emptyIcon}>💊</Text>
-            <Text style={styles.emptyTitle}>No medications found</Text>
+            <Text style={styles.emptyTitle}>
+              {activeTab === 'missed' ? 'Nothing missed today' : 'No medications found'}
+            </Text>
             <Text style={styles.emptySub}>
               {activeTab === 'upcoming'
                 ? 'No upcoming medications for today.'
+                : activeTab === 'missed'
+                ? 'Well done, you are on track.'
                 : 'Add medications in your profile to see them here.'}
             </Text>
           </View>
@@ -204,7 +239,7 @@ export default function RemindersScreen() {
           <View style={[styles.listCard, Shadow.sm]}>
             {filteredMeds.map((m, i) => (
               <View key={m.id}>
-                <MedCard med={m} onMarkDone={handleMarkDone} />
+                <MedCard med={m} saving={savingId === m.id} onMarkDone={handleMarkDone} />
                 {i < filteredMeds.length - 1 && <View style={styles.divider} />}
               </View>
             ))}
@@ -272,4 +307,10 @@ const styles = StyleSheet.create({
   emptyIcon:  { fontSize: 40, marginBottom: 12 },
   emptyTitle: { fontFamily: Font.sansBold, fontSize: 15, color: Colors.text, marginBottom: 6 },
   emptySub:   { fontFamily: Font.sans, fontSize: 13, color: Colors.textMuted, textAlign: 'center', lineHeight: 20, paddingHorizontal: 24 },
+  permCard: {
+    backgroundColor: Colors.redSoft, borderRadius: Radius.md,
+    padding: 14, borderWidth: 1, borderColor: Colors.red, marginBottom: 14,
+  },
+  permTitle: { fontFamily: Font.sansBold, fontSize: 13, color: Colors.red, marginBottom: 4 },
+  permSub:   { fontFamily: Font.sans, fontSize: 12, color: Colors.text, lineHeight: 18 },
 })

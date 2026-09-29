@@ -2,8 +2,9 @@ import { ReminderCard } from '@/components/ReminderCard'
 import { VoiceButton } from '@/components/VoiceButton'
 import { Colors, Font, Shadow } from '@/constants/theme'
 import { supabase } from '@/lib/supabase'
-import { useRouter } from 'expo-router'
-import { useEffect, useState } from 'react'
+import { DoseStatus, fetchTakenToday, getDoseStatus, logDoseTaken, sortByDoseTime } from '@/lib/medReminders'
+import { useFocusEffect, useRouter } from 'expo-router'
+import { useCallback, useEffect, useState } from 'react'
 import { ActivityIndicator, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 
 type MedStatus = 'done' | 'upcoming' | 'overdue' | 'pending'
@@ -16,17 +17,12 @@ function getGreeting() {
   return 'Good evening,'
 }
 
-function getStatus(time: string): MedStatus {
-  const now = new Date()
-  const hour = now.getHours()
-  const [timePart, meridiem] = (time ?? '').split(' ')
-  const [h] = (timePart ?? '0:0').split(':').map(Number)
-  let medHour = h
-  if (meridiem === 'PM' && h !== 12) medHour += 12
-  if (meridiem === 'AM' && h === 12) medHour = 0
-  if (hour > medHour + 1) return 'done'
-  if (hour > medHour) return 'overdue'
-  return 'upcoming'
+// Maps a real dose status (from medication_logs) to the ReminderCard styles
+const CARD_STATUS: Record<DoseStatus, MedStatus> = {
+  taken:    'done',
+  upcoming: 'upcoming',
+  due:      'pending',
+  missed:   'overdue',
 }
 
 export default function HomeScreen() {
@@ -36,11 +32,18 @@ export default function HomeScreen() {
   const [initials, setInitials]     = useState('?')
   const [reminders, setReminders]   = useState<Reminder[]>([])
   const [loadingMeds, setLoadingMeds] = useState(true)
+  const [dueCount, setDueCount]       = useState(0)
 
   useEffect(() => {
     loadUser()
-    loadReminders()
   }, [])
+
+  // Refresh reminders each time Home is shown
+  useFocusEffect(
+    useCallback(() => {
+      loadReminders()
+    }, []),
+  )
 
   async function loadUser() {
     try {
@@ -65,21 +68,28 @@ export default function HomeScreen() {
     try {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) return
-      const { data } = await supabase
-        .from('medications')
-        .select('id, name, dosage, time')
-        .eq('user_id', user.id)
-        .order('time', { ascending: true })
-        .limit(3)
+      const [{ data }, taken] = await Promise.all([
+        supabase
+          .from('medications')
+          .select('id, name, dosage, time, active')
+          .eq('user_id', user.id),
+        fetchTakenToday(user.id),
+      ])
 
       if (data) {
-        setReminders(data.map(m => ({
+        const now = new Date()
+        const all = sortByDoseTime(data.filter(m => m.active !== false)).map(m => ({
           id:     m.id,
           name:   m.name,
           dosage: m.dosage,
           time:   m.time,
-          status: getStatus(m.time),
-        })))
+          status: getDoseStatus(m.time, taken.has(m.id), now),
+        }))
+        setDueCount(all.filter(m => m.status !== 'taken').length)
+        // Show the next doses still to take first, then taken ones
+        const pending = all.filter(m => m.status !== 'taken')
+        const done    = all.filter(m => m.status === 'taken')
+        setReminders([...pending, ...done].slice(0, 3).map(m => ({ ...m, status: CARD_STATUS[m.status] })))
       }
     } catch (e) {
       console.log('Reminders error:', e)
@@ -88,8 +98,17 @@ export default function HomeScreen() {
     }
   }
 
+  async function markTaken(id: string) {
+    try {
+      await logDoseTaken(id)
+      loadReminders()
+    } catch (e) {
+      console.log('Mark taken error:', e)
+    }
+  }
+
   const quickCards = [
-    { icon: '💊', bg: Colors.sagePale,  title: 'Medications', sub: `${reminders.length} due today`, route: '/reminders' },
+    { icon: '💊', bg: Colors.sagePale,  title: 'Medications', sub: `${dueCount} left today`, route: '/reminders' },
     { icon: '📅', bg: Colors.amberSoft, title: 'Schedule',    sub: 'Appointments',                  route: '/schedule'  },
     { icon: '📊', bg: Colors.skySoft, title: 'Overview', sub: 'Health summary', route: '/family' },
     { icon: '🚨', bg: Colors.redSoft,   title: 'SOS',         sub: 'Hold to alert',                 route: '/sos'       },
@@ -162,6 +181,7 @@ export default function HomeScreen() {
                 dosage={r.dosage}
                 time={r.time}
                 status={r.status}
+                onMark={r.status === 'done' ? undefined : () => markTaken(r.id)}
               />
             ))
           )}

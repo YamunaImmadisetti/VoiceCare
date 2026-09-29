@@ -1,5 +1,6 @@
 import { Colors, Font, Shadow } from '@/constants/theme'
 import { supabase } from '@/lib/supabase'
+import { fetchTakenToday, getDoseStatus, sortByDoseTime } from '@/lib/medReminders'
 import { useCallback, useEffect, useState } from 'react'
 import { ActivityIndicator, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native'
 
@@ -32,43 +33,45 @@ export default function FamilyScreen() {
       }
 
       // Load medications
-      const { data: medsData } = await supabase
-        .from('medications')
-        .select('name, dosage, time, frequencies')
-        .eq('user_id', user.id)
+      const [{ data: medsData }, takenMap] = await Promise.all([
+        supabase
+          .from('medications')
+          .select('id, name, dosage, time, frequencies, active')
+          .eq('user_id', user.id),
+        fetchTakenToday(user.id),
+      ])
 
-      if (medsData) {
-        const now = new Date()
-        const hour = now.getHours()
-
-        const medsWithStatus: Med[] = medsData.map(m => {
-          const [timePart, meridiem] = (m.time ?? '').split(' ')
-          const [h] = (timePart ?? '0').split(':').map(Number)
-          let medHour = h
-          if (meridiem === 'PM' && h !== 12) medHour += 12
-          if (meridiem === 'AM' && h === 12) medHour = 0
-
-          const status: Med['status'] =
-            hour > medHour + 1 ? 'taken' :
-            hour > medHour     ? 'pending' : 'pending'
-
-          return { name: m.name, dosage: m.dosage, status }
-        })
-
-        setMeds(medsWithStatus)
-        const taken = medsWithStatus.filter(m => m.status === 'taken').length
-        setAdherencePct(medsData.length > 0 ? Math.round((taken / medsData.length) * 100) : 0)
-      }
-
-      // Build timeline from real activity
       const now = new Date()
       const timeStr = (d: Date) =>
         d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
 
+      const activeMeds = sortByDoseTime((medsData ?? []).filter(m => m.active !== false))
+
+      const medsWithStatus: Med[] = activeMeds.map(m => {
+        const s = getDoseStatus(m.time, takenMap.has(m.id), now)
+        const status: Med['status'] = s === 'taken' ? 'taken' : s === 'missed' ? 'missed' : 'pending'
+        return { name: m.name, dosage: m.dosage, status }
+      })
+
+      setMeds(medsWithStatus)
+      const taken = medsWithStatus.filter(m => m.status === 'taken').length
+      setAdherencePct(medsWithStatus.length > 0 ? Math.round((taken / medsWithStatus.length) * 100) : 0)
+
+      // Timeline from real dose logs (newest first)
+      const doseEvents: TimelineItem[] = activeMeds
+        .filter(m => takenMap.has(m.id))
+        .map(m => ({ at: new Date(takenMap.get(m.id)!), m }))
+        .sort((x, y) => y.at.getTime() - x.at.getTime())
+        .map(({ at, m }) => ({
+          time:   timeStr(at),
+          dot:    Colors.amber,
+          event:  'Medication taken',
+          detail: `${m.name} ${m.dosage ?? ''} confirmed`.trim(),
+        }))
+
       setTimeline([
-        { time: timeStr(now), dot: Colors.sage,  event: 'App active',       detail: 'User is currently using CareVoice' },
-        { time: timeStr(new Date(now.getTime() - 30 * 60000)), dot: Colors.amber, event: 'Medication reminder', detail: 'Morning dose reminder sent' },
-        { time: timeStr(new Date(now.getTime() - 60 * 60000)), dot: Colors.sky,   event: 'App opened',          detail: 'Daily check-in completed' },
+        { time: timeStr(now), dot: Colors.sage, event: 'App active', detail: 'User is currently using CareVoice' },
+        ...doseEvents,
       ])
 
     } catch (e) {

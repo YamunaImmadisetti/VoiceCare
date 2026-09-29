@@ -1,8 +1,9 @@
+// app/(tabs)/sos.tsx
 import { SOSButton } from '@/components/SOSButton'
 import { Colors, Font, Radius, Shadow } from '@/constants/theme'
 import { supabase } from '@/lib/supabase'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ActivityIndicator, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { ActivityIndicator, Linking, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
 
 type ContactStatus = 'idle' | 'calling' | 'no-answer' | 'responded'
 type AlertState    = 'idle' | 'active' | 'cancelled'
@@ -17,16 +18,51 @@ type Contact = {
   status: ContactStatus
 }
 
+// ── Real call + SMS helpers ────────────────────
+function openSafely(url: string) {
+  Linking.openURL(url).catch(e => console.log('Could not open', url, e))
+}
+
+function callContact(phone: string) {
+  openSafely(`tel:${phone}`)
+}
+
+function smsContact(phone: string, name: string) {
+  const message = `EMERGENCY: ${name} has triggered an SOS alert and needs immediate help. Please call them now.`
+  openSafely(`sms:${phone}?body=${encodeURIComponent(message)}`)
+}
+
+async function getUserName(): Promise<string> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return 'Your family member'
+    const { data } = await supabase.from('profiles').select('full_name').eq('id', user.id).single()
+    return data?.full_name ?? 'Your family member'
+  } catch {
+    return 'Your family member'
+  }
+}
+
 export default function SOSScreen() {
   const [alertState, setAlertState] = useState<AlertState>('idle')
   const [countdown, setCountdown]   = useState(167)
   const [contacts, setContacts]     = useState<Contact[]>([])
   const [loading, setLoading]       = useState(true)
   const intervalRef = useRef<any>(null)
-  const timeoutRef  = useRef<any>(null)
+  const pendingRef  = useRef<ReturnType<typeof setTimeout>[]>([])  // every scheduled call/SMS
+  const activeRef   = useRef(false)                                // false once cancelled
+  const notifiedRef = useRef<string[]>([])                         // phones actually contacted
+
   const clearAllTimers = () => {
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
-    if (timeoutRef.current)  { clearTimeout(timeoutRef.current);   timeoutRef.current  = null }
+    pendingRef.current.forEach(clearTimeout)
+    pendingRef.current = []
+  }
+
+  // Schedules a step that is skipped if the alert was cancelled in the meantime
+  const later = (fn: () => void, ms: number) => {
+    const id = setTimeout(() => { if (activeRef.current) fn() }, ms)
+    pendingRef.current.push(id)
   }
 
   const loadContacts = useCallback(async () => {
@@ -51,60 +87,91 @@ export default function SOSScreen() {
   useEffect(() => { loadContacts() }, [loadContacts])
 
   useEffect(() => {
-    if (alertState === 'active') {
-      // Simulate calling contacts sequentially
-      setContacts(prev => prev.map((c, i) => ({
-        ...c,
-        status: i === 0 ? 'calling' : 'idle',
-      })))
+    if (alertState !== 'active') {
+      activeRef.current = false
+      clearAllTimers()
+      if (alertState === 'idle') {
+        notifiedRef.current = []
+        setCountdown(167)
+        setContacts(prev => prev.map(c => ({ ...c, status: 'idle' })))
+      }
+      return
+    }
 
-      // Start countdown
-      intervalRef.current = setInterval(() => {
-        setCountdown(s => {
-          if (s <= 1) {
-            if (intervalRef.current) {
-              clearInterval(intervalRef.current)
-              intervalRef.current = null
-            }
-            return 0
-          }
-          return s - 1
-        })
-      }, 1000)
+    activeRef.current   = true
+    notifiedRef.current = []
+    const list = contacts
 
-      // After 30s mark first as no-answer, call second
-      timeoutRef.current = setTimeout(() => {
+    // Update UI — first contact shows as calling
+    setContacts(prev => prev.map((c, i) => ({ ...c, status: i === 0 ? 'calling' : 'idle' })))
+
+    getUserName().then(userName => {
+      if (!activeRef.current) return   // cancelled while loading the name
+
+      // 1️⃣ Call + SMS first contact
+      if (list[0]) {
+        notifiedRef.current.push(list[0].phone)
+        callContact(list[0].phone)
+        later(() => smsContact(list[0].phone, userName), 1000)
+      }
+
+      // 2️⃣ After 30s — move to second contact
+      later(() => {
         setContacts(prev => prev.map((c, i) => ({
           ...c,
           status: i === 0 ? 'no-answer' : i === 1 ? 'calling' : 'idle',
         })))
+        if (list[1]) {
+          notifiedRef.current.push(list[1].phone)
+          callContact(list[1].phone)
+          later(() => smsContact(list[1].phone, userName), 1000)
+        }
       }, 30000)
+    })
 
-    } else {
-      clearAllTimers()
-      if (alertState === 'idle') {
-        setCountdown(167)
-        setContacts(prev => prev.map(c => ({ ...c, status: 'idle' })))
-      }
-    }
+    // Countdown timer
+    intervalRef.current = setInterval(() => {
+      setCountdown(s => {
+        if (s <= 1) {
+          if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+          return 0
+        }
+        return s - 1
+      })
+    }, 1000)
 
     return () => clearAllTimers()
   }, [alertState])
+
+  // Cancel immediately, then (in the background) text the contacts we reached that she is safe
+  function handleCancel() {
+    activeRef.current = false
+    clearAllTimers()
+    setAlertState('cancelled')
+
+    const phones = [...new Set(notifiedRef.current)]
+    if (phones.length === 0) return
+    getUserName().then(userName => {
+      const safeMessage = `UPDATE: ${userName} has cancelled the SOS alert. They are safe.`
+      // One SMS screen with all recipients (opening several at once doesn't work on Android)
+      openSafely(`sms:${phones.join(',')}?body=${encodeURIComponent(safeMessage)}`)
+    })
+  }
 
   const mins = Math.floor(countdown / 60)
   const secs = countdown % 60
 
   const statusColor: Record<ContactStatus, string> = {
-    idle:          Colors.textMuted,
-    calling:       Colors.amber,
-    'no-answer':   Colors.red,
-    responded:     Colors.sage,
+    idle:        Colors.textMuted,
+    calling:     Colors.amber,
+    'no-answer': Colors.red,
+    responded:   Colors.sage,
   }
   const statusLabel: Record<ContactStatus, string> = {
-    idle:          'On standby',
-    calling:       'Calling…',
-    'no-answer':   'No answer',
-    responded:     'Responded ✓',
+    idle:        'On standby',
+    calling:     'Calling…',
+    'no-answer': 'No answer',
+    responded:   'Responded ✓',
   }
 
   if (loading) {
@@ -115,6 +182,7 @@ export default function SOSScreen() {
     )
   }
 
+  // ── IDLE STATE ─────────────────────────────────
   if (alertState === 'idle') {
     return (
       <SafeAreaView style={styles.safe}>
@@ -176,10 +244,10 @@ export default function SOSScreen() {
     )
   }
 
+  // ── ACTIVE / CANCELLED STATE ───────────────────
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: Colors.red }]}>
 
-      {/* Active / Cancelled header */}
       <View style={styles.activeHeader}>
         <View style={styles.activeBadge}>
           <View style={styles.blinkDot} />
@@ -250,10 +318,11 @@ export default function SOSScreen() {
           </View>
         </View>
 
+        {/* Cancel button — sends safe SMS to all notified contacts */}
         {alertState === 'active' && (
           <TouchableOpacity
             style={styles.cancelBtn}
-            onPress={() => setAlertState('cancelled')}
+            onPress={handleCancel}
             activeOpacity={0.85}
           >
             <Text style={styles.cancelText}>I&apos;m Safe — Cancel Alert</Text>

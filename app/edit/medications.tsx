@@ -5,6 +5,7 @@ import {
 } from 'react-native'
 import { useRouter } from 'expo-router'
 import { supabase } from '@/lib/supabase'
+import { syncMedicationReminders } from '@/lib/medReminders'
 import { Colors, Font, Radius } from '@/constants/theme'
 
 type Med = {
@@ -85,6 +86,7 @@ export default function EditMedicationsScreen() {
       setNewMed({ ...EMPTY_MED })
       setShowForm(false)
       loadMeds()
+      syncMedicationReminders().catch(e => console.log('Reminder sync error:', e))
     } catch (e: any) {
       Alert.alert('Error', e.message ?? 'Could not save.')
     } finally {
@@ -103,6 +105,7 @@ export default function EditMedicationsScreen() {
           onPress: async () => {
             await supabase.from('medications').delete().eq('id', id)
             loadMeds()
+            syncMedicationReminders().catch(e => console.log('Reminder sync error:', e))
           },
         },
       ]

@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Colors, Font, Radius, Shadow } from '@/constants/theme'
 import { useOnboarding } from '@/context/OnboardingContext'
 import { supabase } from '@/lib/supabase'
+import { syncMedicationReminders } from '@/lib/medReminders'
 
 // ── Summary items ──────────────────────────────
 const SUMMARY_ITEMS = [
@@ -193,6 +194,9 @@ export default function CompleteScreen() {
           )
 
         if (medsError) throw medsError
+
+        // Schedule daily medicine reminder notifications
+        syncMedicationReminders().catch(e => console.log('Reminder sync error:', e))
       }
 
       // 6️⃣ Save emergency contacts — one row per contact
